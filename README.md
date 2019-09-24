@@ -48,7 +48,7 @@ How to use the atomic libraries and the memory models of C11 and C++11 will be t
 
 ### Some implementations out there
 
-* [TinySTM](http://www.tmware.org/tinystm.html)
+* [TinySTM](https://github.com/patrickmarlier/tinystm) 
 
 * [LibLTX](https://sourceforge.net/projects/libltx)
 
