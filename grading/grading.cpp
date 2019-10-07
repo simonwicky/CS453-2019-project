@@ -331,7 +331,7 @@ int main(int argc, char** argv) {
                 } catch (Exception::BoundedOverrun const& err) { // Special case: cannot unload library with running threads, so print error and quick-exit
                     ::std::cerr << "⎪ *** EXCEPTION - main thread ***" << ::std::endl;
                     ::std::cerr << "⎩ " << err.what() << ::std::endl;
-                    ::std::quick_exit(2);
+                    ::std::exit(2);
                 }
             } catch (::std::exception const& err) {
                 ::std::cerr << "⎪ *** EXCEPTION - main thread ***" << ::std::endl;
