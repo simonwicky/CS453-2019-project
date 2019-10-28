@@ -74,7 +74,7 @@ using namespace std;
 // -------------------------------------------------------------------------- //
 
 struct segment {
-    //shared_mutex lock;
+    /shared_mutex lock;
     byte* mem;
     //struct segment* previous;
     //struct segment* next;
@@ -100,7 +100,7 @@ struct transaction {
     vector<struct log*> logs;
     struct region* region;
     bool is_ro;
-    //vector<shared_mutex*> locks;
+    vector<shared_mutex*> locks;
 };
 
 /** Create (i.e. allocate + init) a new shared memory region, with one first non-free-able allocated segment of the requested size and alignment.
@@ -140,12 +140,12 @@ shared_t tm_create(size_t size, size_t align) noexcept{
  * @param shared Shared memory region to destroy, with no running transaction
 **/
 void tm_destroy(shared_t shared ) noexcept {
-    struct region* region = (struct region*) shared;
-    for (auto seg : region->segments){
-        free(seg->mem);
-        free(seg);
-    }
-    free(shared);
+    // struct region* region = (struct region*) shared;
+    // for (auto seg : region->segments){
+    //     //free(seg->mem);
+    //     //free(seg);
+    // }
+    // //free(shared);
 }
 
 /** [thread-safe] Return the start address of the first allocated segment in the shared memory region.
@@ -183,20 +183,20 @@ void rollback(shared_t shared as(unused), tx_t tx as(unused)){
         free(change->old_data);
         free(change);
     }
-    //for (auto lock : trans->locks) {
-    //    lock->unlock();
-    //}
+    for (auto lock : trans->locks) {
+        lock->unlock();
+    }
 
     return;
 }
 
-bool check_lock(tx_t tx as (unused), shared_mutex* lock as (unused)){
-    //struct transaction * trans = (struct transaction*) tx;
-    //for(auto candidate : trans->locks){
-    //    if (candidate == lock) {
+bool check_lock(tx_t tx, shared_mutex* lock){
+    struct transaction * trans = (struct transaction*) tx;
+    for(auto candidate : trans->locks){
+        if (candidate == lock) {
             return true;
-    //    }
-    //}
+        }
+    }
     return false;
 
 }
@@ -228,17 +228,17 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
 **/
 bool tm_end(shared_t shared as(unused), tx_t tx) noexcept {
     printf("tm_end : HERE\n");
-    struct transaction* trans = (struct transaction*) tx;
-    //for (auto lock : trans->locks) {
-    //    lock->unlock();
-    //}
-    if (!trans ->is_ro){
-        for(auto change : trans->logs){
-            free(change->old_data);
-            free(change);
-        }
-    }
-    free(trans);
+    // struct transaction* trans = (struct transaction*) tx;
+    // for (auto lock : trans->locks) {
+    //     lock->unlock();
+    // }
+    // if (!trans ->is_ro){
+    //     for(auto change : trans->logs){
+    //         //free(change->old_data);
+    //         //free(change);
+    //     }
+    // }
+    // //free(trans);
     return false;
 }
 
@@ -252,27 +252,27 @@ bool tm_end(shared_t shared as(unused), tx_t tx) noexcept {
 **/
 bool tm_read(shared_t shared, tx_t tx, void const* source, size_t size, void* target) noexcept {
     printf("tm_read HERE\n");
-    struct region* region = (struct region*) shared;
+    // struct region* region = (struct region*) shared;
 
-    for(auto seg : region->segments){
+    // for(auto seg : region->segments){
 
-        //find segment to read on
-        if(target < seg->mem + size){
-            //if cannot lock it, abort
-            //if(!seg->lock.try_lock_shared()){
-                //if (!check_lock(tx,&seg->lock)){
-                //    rollback(shared,tx);
-                //    return false;
-                //}
-            //}
-            //if locked, remember which one
-            //((struct transaction*) tx)->locks.push_back(&seg->lock);
-            //copy the memory
-            memcpy(target, source, size);
-            return true;
-        }
-    }
-    rollback(shared,tx);
+    //     //find segment to read on
+    //     if(target < seg->mem + size){
+    //         //if cannot lock it, abort
+    //         if(!seg->lock.try_lock_shared()){
+    //             if (!check_lock(tx,&seg->lock)){
+    //                 rollback(shared,tx);
+    //                 return false;
+    //             }
+    //         }
+    //         //if locked, remember which one
+    //         ((struct transaction*) tx)->locks.push_back(&seg->lock);
+    //         //copy the memory
+    //         memcpy(target, source, size);
+    //         return true;
+    //     }
+    // }
+    // rollback(shared,tx);
     return false;
 }
 
@@ -291,48 +291,48 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
 
     for(auto const& seg : reg->segments){
     printf("tm_write LOOP HERE\n");
-        //find segment to write on
+    //     //find segment to write on
 
         std::cout << seg;
         printf("tm_write BUG HERE\n");  
         if(target < seg->mem + size){
-            //if cannot lock it, abort
+    //         //if cannot lock it, abort
             printf("tm_write FOUND SEG\n");
-            //if(!seg->lock.try_lock()){
-            //     if (!check_lock(tx,&seg->lock)){
-            //         rollback(shared,tx);
-            //         printf("tm_write END HERE\n");
-            //         return false;
-            //     }
-            // }
-            //if locked, remember which one
-            //trans->locks.push_back(&seg->lock);
-            //prepare the log
-            struct log* change = (struct log*) malloc(sizeof(struct log));
-            if (unlikely(change == NULL)){
-                rollback(shared,tx);
-                printf("tm_write END HERE\n");
-                return false;
-            }
-            change->old_data = malloc(sizeof(byte) * size);
-            if (unlikely(change->old_data == NULL)){
-                rollback(shared,tx);
-                printf("tm_write END HERE\n");
-                return false;
-            }
-            memcpy(change->old_data, target, size);
-            change->size = size;
-            change->location = target;
-            //remember the log
-            trans->logs.insert(trans->logs.begin(),change);
-            //copy the memory
-            memcpy(target, source, size);
-            printf("tm_write END HERE\n");
-            return true;
+    //         if(!seg->lock.try_lock()){
+    //             if (!check_lock(tx,&seg->lock)){
+    //                 rollback(shared,tx);
+    //                 printf("tm_write END HERE\n");
+    //                 return false;
+    //             }
+    //         }
+    //         //if locked, remember which one
+    //         trans->locks.push_back(&seg->lock);
+    //         //prepare the log
+    //         struct log* change = (struct log*) malloc(sizeof(struct log));
+    //         if (unlikely(change == NULL)){
+    //             rollback(shared,tx);
+    //             printf("tm_write END HERE\n");
+    //             return false;
+    //         }
+    //         change->old_data = malloc(sizeof(byte) * size);
+    //         if (unlikely(change->old_data == NULL)){
+    //             rollback(shared,tx);
+    //             printf("tm_write END HERE\n");
+    //             return false;
+    //         }
+    //         memcpy(change->old_data, target, size);
+    //         change->size = size;
+    //         change->location = target;
+    //         //remember the log
+    //         trans->logs.insert(trans->logs.begin(),change);
+    //         //copy the memory
+    //         memcpy(target, source, size);
+    //         printf("tm_write END HERE\n");
+    //         return true;
         }
     }
     // //if the address is not in the given region, abort the transaction
-    rollback(shared,tx);
+    // rollback(shared,tx);
     printf("tm_write END HERE\n");
     return true;
 }
@@ -346,21 +346,21 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
 **/
 Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) noexcept {
     printf("tm_alloc HERE\n");
-    struct region* region = (struct region*) shared;
+    // struct region* region = (struct region*) shared;
 
-    struct segment* seg = (struct segment*) malloc(sizeof(struct segment));
-    if (unlikely(seg == NULL)) {
-        return Alloc::nomem;
-    }
+    // struct segment* seg = (struct segment*) malloc(sizeof(struct segment));
+    // if (unlikely(seg == NULL)) {
+    //     return Alloc::nomem;
+    // }
 
-    if (unlikely(posix_memalign((void**) &(seg->mem), region->align, size) != 0)){
-        //free(seg);
-        return Alloc::nomem;
-    }
-    memset(seg->mem, 0, size);
-    *target = (void *) seg->mem;
-    region->segments.push_back(seg);
-    seg->size = size;
+    // if (unlikely(posix_memalign((void**) &(seg->mem), region->align, size) != 0)){
+    //     //free(seg);
+    //     return Alloc::nomem;
+    // }
+    // memset(seg->mem, 0, size);
+    // *target = (void *) seg->mem;
+    // region->segments.push_back(seg);
+    // seg->size = size;
 
     return Alloc::abort;
 }
@@ -373,26 +373,26 @@ Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) 
 **/
 bool tm_free(shared_t shared, tx_t tx, void* target) noexcept {
     printf("tm_free HERE\n");
-    struct region* region = (struct region*) shared;
+    // struct region* region = (struct region*) shared;
 
-    for(auto seg : region->segments){
+    // for(auto seg : region->segments){
 
-        //find segment to write on
-        if(target == seg->mem){
-            //if cannot lock it, abort
-            // if(!seg->lock.try_lock()){
-            //     if (!tm_check_lock(tx,&seg->lock)){
-            //         tm_rollback(shared,tx);
-            //         return false;
-            //     }
-            // }
-            free(seg->mem);
-            free(seg);
+    //     //find segment to write on
+    //     if(target == seg->mem){
+    //         //if cannot lock it, abort
+    //         if(!seg->lock.try_lock()){
+    //             if (!tm_check_lock(tx,&seg->lock)){
+    //                 tm_rollback(shared,tx);
+    //                 return false;
+    //             }
+    //         }
+    //         //free(seg->mem);
+    //         //free(seg);
 
-            return true;
-        }
-    }
-    //if the address is not in the given region, abort the transaction
-    rollback(shared,tx);
+    //         return true;
+    //     }
+    // }
+    // //if the address is not in the given region, abort the transaction
+    // tm_rollback(shared,tx);
     return false;
 }
