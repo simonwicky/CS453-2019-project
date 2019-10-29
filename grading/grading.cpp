@@ -27,6 +27,7 @@
 #include <cstring>
 #include <iostream>
 #include <random>
+#include <variant>
 
 // Internal headers
 #include "common.hpp"
@@ -54,6 +55,8 @@ private:
     ::std::atomic<unsigned int> nbready; // Number of thread having reached that state
     ::std::atomic<Status>       status;  // Current synchronization status
     ::std::atomic<char const*>  errmsg;  // Any one of the error message(s)
+    Chrono                      runtime; // Runtime between 'master_notify' and when the last worker finished
+    Latch                     donelatch; // For synchronization last worker -> master
 public:
     /** Deleted copy constructor/assignment.
     **/
@@ -68,6 +71,7 @@ public:
     **/
     void master_notify() noexcept {
         status.store(Status::Wait, ::std::memory_order_relaxed);
+        runtime.start();
     }
     /** Master trigger termination in all threads (instead of notifying).
     **/
@@ -76,25 +80,23 @@ public:
     }
     /** Master wait for all workers to finish.
      * @param maxtick Maximum number of ticks to wait before exiting the process on an error (optional, 'invalid_tick' for none)
-     * @return Error constant null-terminated string ('nullptr' for none)
+     * @return Total execution time on success, or error constant null-terminated string on failure
     **/
-    char const* master_wait(Chrono::Tick maxtick = Chrono::invalid_tick) {
-        Chrono chrono;
-        chrono.start();
-        while (true) {
-            switch (status.load(::std::memory_order_acquire)) { // Synchronize-with 'worker_notify' (in case of shared memory)
-            case Status::Done:
-                return nullptr;
-            case Status::Fail:
-                return errmsg;
-            default:
-                long_pause();
-                if (maxtick != Chrono::invalid_tick && chrono.delta() > maxtick)
-                    throw Exception::BoundedOverrun{"transactional library takes too long to process the transactions"};
-            }
+    ::std::variant<Chrono, char const*> master_wait(Chrono::Tick maxtick = Chrono::invalid_tick) {
+        // Wait for all worker threads, synchronize-with the last one
+        if (!donelatch.wait(maxtick))
+            throw Exception::BoundedOverrun{"transactional library takes too long to process the transactions"};
+        // Return runtime on success, of error message on failure
+        switch (status.load(::std::memory_order_relaxed)) {
+        case Status::Done:
+            return runtime;
+        case Status::Fail:
+            return errmsg;
+        default:
+            throw Exception::Unreachable{"Master woke after raised latch, no timeout, but unexpected status"};
         }
     }
-    /** Worker wait until next run.
+    /** Worker spin-wait until next run.
      * @return Whether the worker can proceed, or quit otherwise
     **/
     bool worker_wait() noexcept {
@@ -129,7 +131,9 @@ public:
         auto&& res = nbready.fetch_add(1, ::std::memory_order_acq_rel); // Synchronize-with previous worker(s) potentially setting aborted status
         if (res + 1 == nbworkers) { // Latest worker, switch to done/fail status
             nbready.store(0, ::std::memory_order_relaxed);
-            status.store(status.load(::std::memory_order_relaxed) == Status::Abort ? Status::Fail : Status::Done, ::std::memory_order_release); // Synchronize-with 'master_wait' (in case of shared memory)
+            status.store(status.load(::std::memory_order_relaxed) == Status::Abort ? Status::Fail : Status::Done, ::std::memory_order_relaxed);
+            runtime.stop();
+            donelatch.raise(); // Synchronize-with 'master_wait'
         }
     }
 };
@@ -192,37 +196,34 @@ static auto measure(Workload& workload, unsigned int const nbthreads, unsigned i
         Chrono::Tick time_chck = Chrono::invalid_tick;
         auto const posmedian = nbrepeats / 2;
         { // Initialization (with cheap correctness test)
-            Chrono chrono;
-            chrono.start();
             sync.master_notify();
-            error = sync.master_wait(maxtick_init);
-            if (unlikely(error))
+            auto res = sync.master_wait(maxtick_init);
+            if (unlikely(::std::holds_alternative<char const*>(res))) {
+                error = ::std::get<char const*>(res);
                 goto join;
-            chrono.stop();
-            time_init = chrono.get_tick();
+            }
+            time_init = ::std::get<Chrono>(res).get_tick();
         }
         { // Performance measurements (with cheap correctness tests)
             for (unsigned int i = 0; i < nbrepeats; ++i) {
-                Chrono chrono;
-                chrono.start();
                 sync.master_notify();
-                error = sync.master_wait(maxtick_perf);
-                if (unlikely(error))
+                auto res = sync.master_wait(maxtick_perf);
+                if (unlikely(::std::holds_alternative<char const*>(res))) {
+                    error = ::std::get<char const*>(res);
                     goto join;
-                chrono.stop();
-                times[i] = chrono.get_tick();
+                }
+                times[i] = ::std::get<Chrono>(res).get_tick();
             }
             ::std::nth_element(times, times + posmedian, times + nbrepeats); // Partition times around the median
         }
         { // Correctness check
-            Chrono chrono;
-            chrono.start();
             sync.master_notify();
-            error = sync.master_wait(maxtick_chck);
-            if (unlikely(error))
+            auto res = sync.master_wait(maxtick_chck);
+            if (unlikely(::std::holds_alternative<char const*>(res))) {
+                error = ::std::get<char const*>(res);
                 goto join;
-            chrono.stop();
-            time_chck = chrono.get_tick();
+            }
+            time_chck = ::std::get<Chrono>(res).get_tick();
         }
         join: { // Joining
             sync.master_join(); // Join with threads
@@ -258,7 +259,7 @@ int main(int argc, char** argv) {
                 res = 16;
             return static_cast<size_t>(res);
         }();
-        auto const nbtxperwrk    = 100000ul / nbworkers;
+        auto const nbtxperwrk    = 200000ul / nbworkers;
         auto const nbaccounts    = 32 * nbworkers;
         auto const expnbaccounts = 256 * nbworkers;
         auto const init_balance  = 100ul;
