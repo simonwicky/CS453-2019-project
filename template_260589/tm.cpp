@@ -77,11 +77,11 @@ struct segment {
     shared_mutex lock;
     byte* mem;
     size_t size;
+    bool freed;
 };
 
 struct region {
     void* start;
-    //size_t nb_segments;
     vector<struct segment*> segments;
     size_t size;
     size_t align;
@@ -95,9 +95,14 @@ struct log{
 
 struct transaction {
     vector<struct log*> logs;
+    vector<struct segment*> to_free;
+    vector<shared_mutex*> to_free_locks;
+    vector<struct segment*> new_segments;
+    vector<shared_mutex*> new_seg_locks;
     struct region* region;
     bool is_ro;
     vector<shared_mutex*> locks;
+    vector<shared_mutex*> read_locks;
 };
 
 /** Create (i.e. allocate + init) a new shared memory region, with one first non-free-able allocated segment of the requested size and alignment.
@@ -106,12 +111,12 @@ struct transaction {
  * @return Opaque shared memory region handle, 'invalid_shared' on failure
 **/
 shared_t tm_create(size_t size, size_t align) noexcept{
-    struct region* region = new struct region();
+    struct region* region = new (std::nothrow) struct region();
     if (unlikely(region == NULL)) {
         return invalid_shared;
     }
 
-    struct segment* seg = new struct segment();
+    struct segment* seg = new (std::nothrow) struct segment();
     if (unlikely(seg == NULL)) {
         delete region;
         return invalid_shared;
@@ -124,11 +129,12 @@ shared_t tm_create(size_t size, size_t align) noexcept{
     }
 
     memset(region->start, 0, size);
-    region->segments.push_back(seg);
     region->align = align;
     region->size = size;
     seg->mem = (byte*) region->start;
     seg->size = size;
+    seg->freed = false;
+    region->segments.push_back(seg);
 
     return region;
 }
@@ -171,18 +177,51 @@ size_t tm_align(shared_t shared) noexcept {
 //================================================================
 //Helper functions
 //================================================================
+void free_segments(tx_t tx, vector<segment*> to_free){
+    struct transaction * trans = (struct transaction*) tx;
+    for(auto seg_to_free : to_free){
+        int index = 0;
+        for(auto seg : trans->region->segments){
+            //find segment to free
+            if(seg == seg_to_free){
+                trans->region->segments.erase(trans->region->segments.begin() + index);
+                free(seg->mem);
+                delete seg;
+            }
+            ++index;
+        }
+    }
+    return;
+}
+
 void rollback(tx_t tx){
     struct transaction* trans = (struct transaction*) tx;
     //if aborting, all the locks are taken
     if (!trans->is_ro){
+        //rolling back writes
         for(auto change : trans->logs){
             memcpy(change->location, change->old_data, change->size);
             free(change->old_data);
             delete change;
         }
+        //rolling back free
+        for(auto segment : trans->to_free){
+            segment->freed = false;
+        }
+        //rolling back allocs
+        free_segments(tx, trans->new_segments);
+
+        for (auto lock : trans->locks) {
+           lock->unlock();
+        }
+        for (auto lock : trans->to_free_locks) {
+           lock->unlock();
+        }
     }
-    for (auto lock : trans->locks) {
-       lock->unlock();
+
+    //unlocking
+    for (auto lock : trans->read_locks) {
+       lock->unlock_shared();
     }
     delete trans;
     return;
@@ -195,9 +234,26 @@ bool check_lock(tx_t tx, shared_mutex* lock){
             return true;
        }
     }
+    for(auto candidate : trans->read_locks){
+       if (candidate == lock) {
+            return true;
+       }
+    }
+    for(auto candidate : trans->new_seg_locks){
+       if (candidate == lock) {
+            return true;
+       }
+    }
+    for(auto candidate : trans->to_free_locks){
+       if (candidate == lock) {
+            return true;
+       }
+    }
     return false;
 
 }
+
+
 //================================================================
 // End of Helper functions
 //================================================================
@@ -208,7 +264,7 @@ bool check_lock(tx_t tx, shared_mutex* lock){
  * @return Opaque transaction ID, 'invalid_tx' on failure
 **/
 tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
-    struct transaction* tx = new struct transaction();
+    struct transaction* tx = new (std::nothrow) struct transaction();
     if(unlikely(tx == NULL)){
        return invalid_tx;
     }
@@ -224,10 +280,18 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
 **/
 bool tm_end(shared_t shared as(unused), tx_t tx) noexcept {
     struct transaction* trans = (struct transaction*) tx;
-    for (auto lock : trans->locks) {
-       lock->unlock();
+    for (auto lock : trans->read_locks) {
+       lock->unlock_shared();
     }
     if (!trans ->is_ro){
+        free_segments(tx, trans->to_free);
+
+        for (auto lock : trans->locks) {
+           lock->unlock();
+        }
+        for (auto lock : trans->new_seg_locks){
+            lock->unlock();
+        }
         for(auto change : trans->logs){
             free(change->old_data);
             delete change;
@@ -250,22 +314,26 @@ bool tm_read(shared_t shared, tx_t tx, void const* source, size_t size, void* ta
     for(auto seg : region->segments){
         //find segment to read on
         if(source >= seg->mem && source < seg->mem + seg->size){
-            //if cannot lock it, abort
-            if(!seg->lock.try_lock_shared()){
-                if (!check_lock(tx,&seg->lock)){
 
+            if (!check_lock(tx,&seg->lock)){
+                if(!seg->lock.try_lock_shared()){
                     rollback(tx);
                     return false;
+                } else {
+                //if locked, remember which one
+                ((struct transaction*) tx)->read_locks.push_back(&seg->lock);
+
                 }
             }
-            //if locked, remember which one
-            ((struct transaction*) tx)->locks.push_back(&seg->lock);
+            if (seg->freed){
+                rollback(tx);
+                return false;
+            }
             //copy the memory
             memcpy(target, source, size);
             return true;
         }
     }
-    printf("Not found for read\n");
     rollback(tx);
     return false;
 }
@@ -283,25 +351,31 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
     struct transaction* trans = (struct transaction*) tx;
 
     for(auto const& seg : reg->segments){
- 
+
         //find segment to write on
         if(target >= seg->mem && target < seg->mem + seg->size){
 
-            //try to lock
-            if(!seg->lock.try_lock()){
-                //didn't work, maybe I have already locked it
-                if (!check_lock(tx,&seg->lock)){
-                    //I don't have it, aborting
+            //mabe i have it already
+            if (!check_lock(tx,&seg->lock)){
+                //no, try to lock it then
+                if(!seg->lock.try_lock()){
+                    //didn't work, aborting
                     rollback(tx);
                     return false;
+                } else {
+                    //i could lock, it is new, remember it
+                    trans->locks.push_back(&seg->lock);
                 }
-            } else {
-                //i could lock, it is new, remember it
-                trans->locks.push_back(&seg->lock);     
+            }
+
+            if (seg->freed){
+                //should not happen, means i'm writing on a segment i freed before
+                rollback(tx);
+                return false;
             }
 
             //prepare the log
-            struct log* change = new struct log();
+            struct log* change = new (std::nothrow) struct log();
             if (unlikely(change == NULL)){
                 rollback(tx);
                 return false;
@@ -336,10 +410,9 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
  * @return Whether the whole transaction can continue (success/nomem), or not (abort_alloc)
 **/
 Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) noexcept {
-    //I could rollback this by freeing the segment
     struct region* region = (struct region*) shared;
 
-    struct segment* seg = new struct segment();
+    struct segment* seg = new (std::nothrow) struct segment();
     if (unlikely(seg == NULL)) {
         return Alloc::nomem;
     }
@@ -350,8 +423,13 @@ Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) 
     }
     memset(seg->mem, 0, size);
     *target = (void *) seg->mem;
-    region->segments.push_back(seg);
     seg->size = size;
+    seg->freed = false;
+    seg->lock.lock();
+    ((struct transaction*) tx)->new_seg_locks.push_back(&seg->lock); 
+    ((struct transaction*) tx)->new_segments.push_back(seg);
+
+    region->segments.push_back(seg);
     return Alloc::success;
 }
 
@@ -362,11 +440,8 @@ Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) 
  * @return Whether the whole transaction can continue
 **/
 bool tm_free(shared_t shared, tx_t tx, void* target) noexcept {
-    //how to rollback this? Mark as free, and free it when it is ended
     struct region* region = (struct region*) shared;
-    int index = 0;
     for(auto seg : region->segments){
-
         //find segment to free
         if(target == seg->mem){
             //if cannot lock it, abort
@@ -376,14 +451,10 @@ bool tm_free(shared_t shared, tx_t tx, void* target) noexcept {
                     return false;
                 }
             }
-            std::cerr << "Free memory for segment : " << seg->mem << std::endl;
-            region->segments.erase(region->segments.begin() + index);
-            free(seg->mem);
-            delete seg;
-
+            ((struct transaction*) tx)->to_free_locks.push_back(&seg->lock);
+            seg->freed = true;
             return true;
         }
-    ++index;
     }
     //if the address is not in the given region, abort the transaction
     rollback(tx);
