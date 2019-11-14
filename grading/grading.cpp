@@ -85,7 +85,7 @@ public:
     ::std::variant<Chrono, char const*> master_wait(Chrono::Tick maxtick = Chrono::invalid_tick) {
         // Wait for all worker threads, synchronize-with the last one
         if (!donelatch.wait(maxtick))
-            throw Exception::BoundedOverrun{"transactional library takes too long to process the transactions"};
+            throw Exception::BoundedOverrun{"Transactional library takes too long to process the transactions"};
         // Return runtime on success, of error message on failure
         switch (status.load(::std::memory_order_relaxed)) {
         case Status::Done:
@@ -178,7 +178,7 @@ static auto measure(Workload& workload, unsigned int const nbthreads, unsigned i
                     sync.worker_notify("Internal worker exception(s)"); // Exception post-'Sync::worker_wait' (i.e. in 'Workload::run' or 'Workload::check'), since 'Sync::worker_*' do not throw
                     { // Print the error
                         ::std::unique_lock<decltype(cerrlock)> guard{cerrlock};
-                        ::std::cerr << "⎪⎧ *** EXCEPTION - worker thread ***" << ::std::endl << "⎪⎩ " << err.what() << ::std::endl;
+                        ::std::cerr << "⎪⎧ *** EXCEPTION ***" << ::std::endl << "⎪⎩ " << err.what() << ::std::endl;
                     }
                     return;
                 }
@@ -293,56 +293,52 @@ int main(int argc, char** argv) {
         auto maxtick_perf = Chrono::invalid_tick;
         auto maxtick_chck = Chrono::invalid_tick;
         for (auto i = 2; i < argc; ++i) {
+            ::std::cout << "⎧ Evaluating '" << argv[i] << "'" << (maxtick_init == Chrono::invalid_tick ? " (reference)" : "") << "..." << ::std::endl;
+            // Load TM library
+            TransactionalLibrary tl{argv[i]};
             try {
-                ::std::cout << "⎧ Evaluating '" << argv[i] << "'" << (maxtick_init == Chrono::invalid_tick ? " (reference)" : "") << "..." << ::std::endl;
-                // Prepare measurement (load TM library + initialize workload)
-                TransactionalLibrary tl{argv[i]};
-                WorkloadBank         bank{tl, nbworkers, nbtxperwrk, nbaccounts, expnbaccounts, init_balance, prob_long, prob_alloc};
+                // Initialize workload (shared memory lifetime bound to workload: created and destroyed at the same time)
+                WorkloadBank bank{tl, nbworkers, nbtxperwrk, nbaccounts, expnbaccounts, init_balance, prob_long, prob_alloc};
                 // Actual performance measurements and correctness check
-                try {
-                    auto res = measure(bank, nbworkers, nbrepeats, seed, maxtick_init, maxtick_perf, maxtick_chck);
-                    // Check false negative-free correctness
-                    auto error = ::std::get<0>(res);
-                    if (unlikely(error)) {
-                        ::std::cout << "⎩ " << error << ::std::endl;
-                        return 1;
-                    }
-                    // Print results
-                    auto tick_init = ::std::get<1>(res);
-                    auto tick_perf = ::std::get<2>(res);
-                    auto tick_chck = ::std::get<3>(res);
-                    auto perfdbl = static_cast<double>(tick_perf);
-                    ::std::cout << "⎪ Total user execution time: " << (perfdbl / 1000000.) << " ms";
-                    if (maxtick_init == Chrono::invalid_tick) { // Set reference performance
-                        maxtick_init = slow_factor * tick_init;
-                        if (unlikely(maxtick_init == Chrono::invalid_tick)) // Bad luck...
-                            ++maxtick_init;
-                        maxtick_perf = slow_factor * tick_perf;
-                        if (unlikely(maxtick_perf == Chrono::invalid_tick)) // Bad luck...
-                            ++maxtick_perf;
-                        maxtick_chck = slow_factor * tick_chck;
-                        if (unlikely(maxtick_chck == Chrono::invalid_tick)) // Bad luck...
-                            ++maxtick_chck;
-                        reference = perfdbl;
-                    } else { // Compare with reference performance
-                        ::std::cout << " -> " << (reference / perfdbl) << " speedup";
-                    }
-                    ::std::cout << ::std::endl;
-                    ::std::cout << "⎩ Average TX execution time: " << (perfdbl / pertxdiv) << " ns" << ::std::endl;
-                } catch (Exception::BoundedOverrun const& err) { // Special case: cannot unload library with running threads, so print error and quick-exit
-                    ::std::cerr << "⎪ *** EXCEPTION - main thread ***" << ::std::endl;
-                    ::std::cerr << "⎩ " << err.what() << ::std::endl;
-                    ::std::quick_exit(2);
+                auto res = measure(bank, nbworkers, nbrepeats, seed, maxtick_init, maxtick_perf, maxtick_chck);
+                // Check false negative-free correctness
+                auto error = ::std::get<0>(res);
+                if (unlikely(error)) {
+                    ::std::cout << "⎩ " << error << ::std::endl;
+                    return 1;
                 }
-            } catch (::std::exception const& err) {
-                ::std::cerr << "⎪ *** EXCEPTION - main thread ***" << ::std::endl;
+                // Print results
+                auto tick_init = ::std::get<1>(res);
+                auto tick_perf = ::std::get<2>(res);
+                auto tick_chck = ::std::get<3>(res);
+                auto perfdbl = static_cast<double>(tick_perf);
+                ::std::cout << "⎪ Total user execution time: " << (perfdbl / 1000000.) << " ms";
+                if (maxtick_init == Chrono::invalid_tick) { // Set reference performance
+                    maxtick_init = slow_factor * tick_init;
+                    if (unlikely(maxtick_init == Chrono::invalid_tick)) // Bad luck...
+                        ++maxtick_init;
+                    maxtick_perf = slow_factor * tick_perf;
+                    if (unlikely(maxtick_perf == Chrono::invalid_tick)) // Bad luck...
+                        ++maxtick_perf;
+                    maxtick_chck = slow_factor * tick_chck;
+                    if (unlikely(maxtick_chck == Chrono::invalid_tick)) // Bad luck...
+                        ++maxtick_chck;
+                    reference = perfdbl;
+                } else { // Compare with reference performance
+                    ::std::cout << " -> " << (reference / perfdbl) << " speedup";
+                }
+                ::std::cout << ::std::endl;
+                ::std::cout << "⎩ Average TX execution time: " << (perfdbl / pertxdiv) << " ns" << ::std::endl;
+            } catch (::std::exception const& err) { // Special case: cannot unload library with running threads, so print error and quick-exit
+                ::std::cerr << "⎪ *** EXCEPTION ***" << ::std::endl;
                 ::std::cerr << "⎩ " << err.what() << ::std::endl;
-                return 1;
+                ::std::quick_exit(2);
             }
         }
         return 0;
     } catch (::std::exception const& err) {
-        ::std::cerr << "⎧ *** EXCEPTION - main thread ***" << ::std::endl << "⎩ " << err.what() << ::std::endl;
+        ::std::cerr << "⎧ *** EXCEPTION ***" << ::std::endl;
+        ::std::cerr << "⎩ " << err.what() << ::std::endl;
         return 1;
     }
 }

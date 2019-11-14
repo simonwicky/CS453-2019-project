@@ -177,14 +177,14 @@ public:
             if (unlikely(shared == STM::invalid_shared))
                 throw Exception::TransactionCreate{};
             start_addr = tl.tm_start(shared);
-        }, "transactional library takes too long during transaction memory initialization");
+        }, "The transactional library takes too long creating the shared memory");
     }
     /** Unbind destructor.
     **/
     ~TransactionalMemory() noexcept {
         bounded_run(max_side_time, [&]() {
             tl.tm_destroy(shared);
-        }, "transactional library takes too long during transaction memory destruction");
+        }, "The transactional library takes too long destroying the shared memory");
     }
 public:
     /** [thread-safe] Return the start address of the first shared segment.

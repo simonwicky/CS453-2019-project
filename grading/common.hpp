@@ -23,9 +23,6 @@
 
 #pragma once
 
-// Compile-time configuration
-// #define USE_MM_PAUSE
-
 // External headers
 #include <atomic>
 #include <chrono>
@@ -38,9 +35,6 @@
 #include <utility>
 extern "C" {
 #include <time.h>
-#if (defined(__i386__) || defined(__x86_64__)) && defined(USE_MM_PAUSE)
-#   include <xmmintrin.h>
-#endif
 }
 
 // -------------------------------------------------------------------------- //
@@ -244,10 +238,8 @@ public:
                 while (!raised)
                     cv.wait(guard);
             } else {
-                while (!raised) {
-                    if (cv.wait_for(guard, ::std::chrono::nanoseconds{maxtick}) == ::std::cv_status::timeout) // Overtime
-                        return false;
-                }
+                if (!cv.wait_for(guard, ::std::chrono::nanoseconds{maxtick}, [&]() { return raised; })) // Overtime
+                    return false;
             }
             // Reset
             raised = false;
