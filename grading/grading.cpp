@@ -296,9 +296,9 @@ int main(int argc, char** argv) {
             ::std::cout << "⎧ Evaluating '" << argv[i] << "'" << (maxtick_init == Chrono::invalid_tick ? " (reference)" : "") << "..." << ::std::endl;
             // Load TM library
             TransactionalLibrary tl{argv[i]};
+            // Initialize workload (shared memory lifetime bound to workload: created and destroyed at the same time)
+            WorkloadBank bank{tl, nbworkers, nbtxperwrk, nbaccounts, expnbaccounts, init_balance, prob_long, prob_alloc};
             try {
-                // Initialize workload (shared memory lifetime bound to workload: created and destroyed at the same time)
-                WorkloadBank bank{tl, nbworkers, nbtxperwrk, nbaccounts, expnbaccounts, init_balance, prob_long, prob_alloc};
                 // Actual performance measurements and correctness check
                 auto res = measure(bank, nbworkers, nbrepeats, seed, maxtick_init, maxtick_perf, maxtick_chck);
                 // Check false negative-free correctness
