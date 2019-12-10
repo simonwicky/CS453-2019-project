@@ -23,9 +23,6 @@
 
 #pragma once
 
-// Compile-time configuration
-// #define USE_MM_PAUSE
-
 // External headers
 #include <atomic>
 #include <chrono>
@@ -38,9 +35,6 @@
 #include <utility>
 extern "C" {
 #include <time.h>
-#if (defined(__i386__) || defined(__x86_64__)) && defined(USE_MM_PAUSE)
-#   include <xmmintrin.h>
-#endif
 }
 
 // -------------------------------------------------------------------------- //
@@ -143,7 +137,7 @@ protected:
 **/
 class Chrono final {
 public:
-    /** Tick class.
+    /** Tick class (always 1 tick = 1 ns).
     **/
     using Tick = uint_fast64_t;
     constexpr static auto invalid_tick = Tick{0xbadc0de}; // Invalid tick value
@@ -205,6 +199,57 @@ public:
     }
 };
 
+/** Atomic waitable latch class.
+**/
+class Latch final {
+private:
+    ::std::mutex            lock; // Local lock
+    ::std::condition_variable cv; // For waiting/waking up
+    bool                  raised; // State of the latch
+public:
+    /** Deleted copy/move constructor/assignment.
+    **/
+    Latch(Latch const&) = delete;
+    Latch& operator=(Latch const&) = delete;
+    /** Initial state constructor.
+     * @param raised Initial state of the latch
+    **/
+    Latch(bool raised = false): lock{}, raised{raised} {}
+public:
+    /** Raise the latch, no-op if already raised, release semantic.
+    **/
+    void raise() {
+        // Release fence
+        ::std::atomic_thread_fence(::std::memory_order_release);
+        // Raise
+        ::std::unique_lock<decltype(lock)> guard{lock};
+        raised = true;
+        cv.notify_all();
+    }
+    /** Wait for the latch to be raised, then reset it, acquire semantic if no timeout.
+     * @param maxtick Maximal duration to wait for (in ticks)
+     * @return Whether the latch was raised before the maximal duration elapsed
+    **/
+    bool wait(Chrono::Tick maxtick) {
+        { // Wait for raised
+            ::std::unique_lock<decltype(lock)> guard{lock};
+            // Wait
+            if (maxtick == Chrono::invalid_tick) {
+                while (!raised)
+                    cv.wait(guard);
+            } else {
+                if (!cv.wait_for(guard, ::std::chrono::nanoseconds{maxtick}, [&]() { return raised; })) // Overtime
+                    return false;
+            }
+            // Reset
+            raised = false;
+        }
+        // Acquire fence
+        ::std::atomic_thread_fence(::std::memory_order_acquire);
+        return true;
+    }
+};
+
 // -------------------------------------------------------------------------- //
 
 /** Pause execution for a "short" period of time.
@@ -215,12 +260,6 @@ static void short_pause() {
 #else
     ::std::this_thread::yield();
 #endif
-}
-
-/** Pause execution for a "longer" period of time.
-**/
-static void long_pause() {
-    ::std::this_thread::sleep_for(::std::chrono::milliseconds(200));
 }
 
 /** Run some function for some bounded time, throws 'Exception::BoundedOverrun' on overtime.

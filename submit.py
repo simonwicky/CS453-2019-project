@@ -176,8 +176,9 @@ for af, socktype, proto, canonname, sa in socket.getaddrinfo(args.host, args.por
 if client_fd is None:
   print("""Unable to connect to %s:%s
 Message to the students:
-  The server side is currently not running, probably because the server machine is being used for another purpose.
-  Please retry later; contact the TAs only if the problem persists for more than a few days.""" % (args.host, args.port))
+  Please make sure you operate from EPFL's network (i.e. either on campus or through the VPN).
+  If you do, it is not unlikely that the server machine is temporarily being used for another purpose.
+  Please retry later; contact the TAs only if the problem persists for more than a day.""" % (args.host, args.port))
   exit(1)
 atexit.register(lambda: client_fd.close())
 
