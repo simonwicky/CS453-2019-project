@@ -124,7 +124,7 @@ shared_t tm_create(size_t size, size_t align) noexcept{
 
     if (unlikely(posix_memalign(&(region->start), align, size) != 0)){
         delete seg;
-        delete region ;
+        delete region;
         return invalid_shared;
     }
 
@@ -178,18 +178,18 @@ size_t tm_align(shared_t shared) noexcept {
 //Helper functions
 //================================================================
 void free_segments(tx_t tx, vector<segment*> to_free){
-    struct transaction * trans = (struct transaction*) tx;
-    for(auto seg_to_free : to_free){
-        int index = 0;
-        for(auto seg : trans->region->segments){
+    struct transaction* trans = (struct transaction*) tx;
+    int index = 0;
+    for(auto seg : trans->region->segments){
+        for(auto seg_to_free : to_free){
             //find segment to free
             if(seg == seg_to_free){
                 trans->region->segments.erase(trans->region->segments.begin() + index);
                 free(seg->mem);
                 delete seg;
             }
-            ++index;
         }
+        ++index;
     }
     return;
 }
@@ -221,7 +221,7 @@ void rollback(tx_t tx){
 
     //unlocking
     for (auto lock : trans->read_locks) {
-       lock->unlock_shared();
+       lock->unlock();
     }
     delete trans;
     return;
@@ -229,12 +229,15 @@ void rollback(tx_t tx){
 
 bool check_lock(tx_t tx, shared_mutex* lock){
     struct transaction * trans = (struct transaction*) tx;
-    for(auto candidate : trans->locks){
+    for(auto candidate : trans->read_locks){
        if (candidate == lock) {
             return true;
        }
     }
-    for(auto candidate : trans->read_locks){
+    if (trans->is_ro){
+        return false;
+    }
+    for(auto candidate : trans->locks){
        if (candidate == lock) {
             return true;
        }
@@ -252,7 +255,6 @@ bool check_lock(tx_t tx, shared_mutex* lock){
     return false;
 
 }
-
 
 //================================================================
 // End of Helper functions
@@ -281,7 +283,7 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
 bool tm_end(shared_t shared as(unused), tx_t tx) noexcept {
     struct transaction* trans = (struct transaction*) tx;
     for (auto lock : trans->read_locks) {
-       lock->unlock_shared();
+       lock->unlock();
     }
     if (!trans ->is_ro){
         free_segments(tx, trans->to_free);
@@ -316,7 +318,7 @@ bool tm_read(shared_t shared, tx_t tx, void const* source, size_t size, void* ta
         if(source >= seg->mem && source < seg->mem + seg->size){
 
             if (!check_lock(tx,&seg->lock)){
-                if(!seg->lock.try_lock_shared()){
+                if(!seg->lock.try_lock()){
                     rollback(tx);
                     return false;
                 } else {
@@ -325,15 +327,12 @@ bool tm_read(shared_t shared, tx_t tx, void const* source, size_t size, void* ta
 
                 }
             }
-            if (seg->freed){
-                rollback(tx);
-                return false;
-            }
             //copy the memory
             memcpy(target, source, size);
             return true;
         }
     }
+    printf("Not found for read\n");
     rollback(tx);
     return false;
 }
@@ -366,12 +365,6 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
                     //i could lock, it is new, remember it
                     trans->locks.push_back(&seg->lock);
                 }
-            }
-
-            if (seg->freed){
-                //should not happen, means i'm writing on a segment i freed before
-                rollback(tx);
-                return false;
             }
 
             //prepare the log
@@ -426,7 +419,7 @@ Alloc tm_alloc(shared_t shared, tx_t tx as(unused), size_t size, void** target) 
     seg->size = size;
     seg->freed = false;
     seg->lock.lock();
-    ((struct transaction*) tx)->new_seg_locks.push_back(&seg->lock); 
+    ((struct transaction*) tx)->new_seg_locks.push_back(&seg->lock);
     ((struct transaction*) tx)->new_segments.push_back(seg);
 
     region->segments.push_back(seg);
