@@ -91,10 +91,11 @@ struct log{
     size_t size;
     void* location;
     void* old_data;
+    struct log* next;
 };
 
 struct transaction {
-    vector<struct log*> logs;
+    struct log* logs;
     vector<struct segment*> to_free;
     vector<shared_mutex*> to_free_locks;
     vector<struct segment*> new_segments;
@@ -199,10 +200,14 @@ void rollback(tx_t tx){
     //if aborting, all the locks are taken
     if (!trans->is_ro){
         //rolling back writes
-        for(auto change : trans->logs){
+        struct log* change = trans->logs;
+        struct log* tmp;
+        while(change != NULL){
             memcpy(change->location, change->old_data, change->size);
             free(change->old_data);
+            tmp = change->next;
             delete change;
+            change = tmp;
         }
         //rolling back free
         for(auto segment : trans->to_free){
@@ -272,6 +277,7 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
     }
     tx->region = (struct region*) shared;
     tx->is_ro = is_ro;
+    tx->logs = NULL;
     return (tx_t) tx;
 }
 
@@ -294,9 +300,14 @@ bool tm_end(shared_t shared as(unused), tx_t tx) noexcept {
         for (auto lock : trans->new_seg_locks){
             lock->unlock();
         }
-        for(auto change : trans->logs){
+
+        struct log* change = trans->logs;
+        struct log* tmp;
+        while(change != NULL){
             free(change->old_data);
+            tmp = change->next;
             delete change;
+            change = tmp;
         }
     }
     delete trans;
@@ -381,9 +392,10 @@ bool tm_write(shared_t shared, tx_t tx, void const* source, size_t size, void* t
             memcpy(change->old_data, target, size);
             change->size = size;
             change->location = target;
+            change->next = trans->logs;
 
             //remember the log
-            trans->logs.insert(trans->logs.begin(),change);
+            trans->logs = change;
             //copy the memory
             memcpy(target, source, size);
             return true;
